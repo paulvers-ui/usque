@@ -1,16 +1,8 @@
 name: CI
 
-# Ran on `main` only, but this fork's default branch is `b2` -- so no push to
-# b2 and no PR targeting it ever built or tested, and changes landed with zero
-# validation. Matching on the default branch by name keeps this correct if the
-# default ever moves again, and pull_request with no branch filter covers PRs
-# into any branch.
 on:
-  push:
-    branches:
-      - main
-      - b2
-  pull_request:
+  push:                        # every commit to any branch
+  pull_request:                # every PR (any base)
   workflow_dispatch:
 
 permissions:
