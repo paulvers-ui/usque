@@ -32,4 +32,35 @@ jobs:
       - name: Run GoReleaser
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: goreleaser release --clean
+        run: |
+          # `goreleaser release` derives the version from the nearest git tag and
+          # refuses to run without one:
+          #   release failed after 0s
+          #   error=git doesn't contain any tags - either add a tag or use --snapshot
+          #
+          # A fork doesn't inherit upstream's tags, so this fails on every
+          # workflow_dispatch here even though the build itself is fine. Only the
+          # tag-push trigger can produce a real, publishable release; a manual run
+          # is a build, so do a snapshot build instead of failing.
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            goreleaser release --clean
+          else
+            echo "::notice::no tag (ref_type=${GITHUB_REF_TYPE}) -- snapshot build, nothing published"
+            goreleaser release --snapshot --clean
+          fi
+
+      # Snapshot builds publish nothing, so without this a manual run would go
+      # green and leave no way to actually get the binaries. android/arm64 here
+      # is the libusque.so the Android app links.
+      - name: Upload build artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: usque-binaries-${{ github.sha }}
+          path: |
+            dist/**/usque*
+            dist/*.tar.gz
+            dist/*.zip
+            dist/checksums.txt
+          retention-days: 30
+          if-no-files-found: warn
