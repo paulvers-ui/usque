@@ -86,7 +86,7 @@ func Register(model, locale, jwt string, acceptTos bool) (*models.AccountData, e
 		req.Header.Set("CF-Access-Jwt-Assertion", jwt)
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := internal.APIClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to send request: %v", err)
 	}
@@ -159,7 +159,7 @@ func EnrollKey(deviceId string, deviceToken string, pubKey []byte, deviceName st
 	}
 	req.Header.Set("Authorization", "Bearer "+deviceToken)
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := internal.APIClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to send request: %v", err)
 	}
@@ -209,7 +209,7 @@ func GetAccount(deviceId string, deviceToken string) (*models.Account, error) {
 	}
 	req.Header.Set("Authorization", "Bearer "+deviceToken)
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := internal.APIClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to send request: %v", err)
 	}
@@ -269,7 +269,7 @@ func UpdateLicenceKey(deviceId string, deviceToken string, licenceKey string) er
 	req.Header.Set("Authorization", "Bearer "+deviceToken)
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := internal.APIClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("failed to send request: %v", err)
 	}
@@ -309,7 +309,7 @@ func DeleteLicenceKey(deviceId string, deviceToken string) error {
 	}
 	req.Header.Set("Authorization", "Bearer "+deviceToken)
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := internal.APIClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("failed to send request: %v", err)
 	}
@@ -349,7 +349,7 @@ func GetDevices(deviceId string, deviceToken string) (*models.Devices, error) {
 	}
 	req.Header.Set("Authorization", "Bearer "+deviceToken)
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := internal.APIClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to send request: %v", err)
 	}
