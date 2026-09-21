@@ -1,6 +1,7 @@
 package internal
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -32,8 +33,60 @@ type SOCKS5Config struct {
 
 // SOCKS5Server wraps txthinking/socks5; DialTCP/DialUDP are package globals (last NewSOCKS5Server wins).
 type SOCKS5Server struct {
-	cfg    SOCKS5Config
-	server *socks5.Server
+	cfg      SOCKS5Config
+	server   *socks5.Server
+	portless portlessAssociations
+}
+
+// portlessAssociations tracks UDP ASSOCIATE requests that left DST.PORT at zero: the
+// client did not yet know which port it would send datagrams from, and RFC 1928 §7
+// then only requires them to come from the client's IP. txthinking keys such an
+// association by the TCP control connection's own source port, so a client that sends
+// from a different port -- firestack does, from an ephemeral one -- had every datagram
+// rejected as "not associated with tcp".
+type portlessAssociations struct {
+	mu   sync.Mutex
+	byIP map[string]*portlessEntry
+}
+
+type portlessEntry struct {
+	refs int
+	done chan byte // closed once the IP's last portless association ends
+}
+
+// add registers one association for ip and returns the func that ends it.
+func (p *portlessAssociations) add(ip string) (release func()) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.byIP == nil {
+		p.byIP = make(map[string]*portlessEntry)
+	}
+	e := p.byIP[ip]
+	if e == nil {
+		e = &portlessEntry{done: make(chan byte)}
+		p.byIP[ip] = e
+	}
+	e.refs++
+	return func() {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		e.refs--
+		if e.refs == 0 {
+			close(e.done)
+			delete(p.byIP, ip)
+		}
+	}
+}
+
+// get returns the channel that closes when ip's last portless association ends.
+func (p *portlessAssociations) get(ip string) (chan byte, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	e, ok := p.byIP[ip]
+	if !ok {
+		return nil, false
+	}
+	return e.done, true
 }
 
 func NewSOCKS5Server(cfg SOCKS5Config) (*SOCKS5Server, error) {
@@ -317,6 +370,9 @@ func (s *SOCKS5Server) TCPHandle(srv *socks5.Server, c *net.TCPConn, r *socks5.R
 		defer close(ch)
 		srv.AssociatedUDP.Set(caddr.String(), ch, -1)
 		defer srv.AssociatedUDP.Delete(caddr.String())
+		if tcpAddr, ok := c.RemoteAddr().(*net.TCPAddr); ok && bytes.Equal(r.DstPort, []byte{0, 0}) {
+			defer s.portless.add(tcpAddr.IP.String())()
+		}
 		_, _ = io.Copy(io.Discard, c)
 		return nil
 	}
@@ -366,11 +422,13 @@ func (s *SOCKS5Server) UDPHandle(srv *socks5.Server, addr *net.UDPAddr, d *socks
 	src := addr.String()
 	var ch chan byte
 	if srv.LimitUDP {
-		any, ok := srv.AssociatedUDP.Get(src)
-		if !ok {
+		if v, ok := srv.AssociatedUDP.Get(src); ok {
+			ch = v.(chan byte)
+		} else if done, ok := s.portless.get(addr.IP.String()); ok {
+			ch = done
+		} else {
 			return fmt.Errorf("udp address %s is not associated with tcp", src)
 		}
-		ch = any.(chan byte)
 	}
 	send := func(ue *socks5.UDPExchange, data []byte) error {
 		select {
