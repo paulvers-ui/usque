@@ -231,7 +231,8 @@ func (s *SOCKS5Server) dialTCP(network, _, raddr string) (net.Conn, error) {
 		return s.cfg.DialTCP(context.Background(), network, raddr)
 	}
 	// Default (tunnel DNS): one netstack lookup + dial, same as the old things-go WithDial path.
-	if s.cfg.Resolver.TunNet != nil {
+	// Not with DoH: netstack would resolve a hostname over plain UDP/53 to -d.
+	if s.cfg.Resolver.TunNet != nil && s.cfg.Resolver.DoH == nil {
 		return s.cfg.TunNet.DialContext(context.Background(), network, raddr)
 	}
 	host, port, err := net.SplitHostPort(raddr)
@@ -257,7 +258,7 @@ func (s *SOCKS5Server) dialTCP(network, _, raddr string) (net.Conn, error) {
 }
 
 func (s *SOCKS5Server) dialUDP(network, laddr, raddr string) (net.Conn, error) {
-	if s.cfg.Resolver.TunNet != nil {
+	if s.cfg.Resolver.TunNet != nil && s.cfg.Resolver.DoH == nil {
 		c, err := s.cfg.TunNet.DialContext(context.Background(), network, raddr)
 		if err != nil {
 			if strings.Contains(err.Error(), "port is in use") {

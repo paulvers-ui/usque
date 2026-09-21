@@ -535,13 +535,17 @@ Refer to the [quic-go documentation](https://github.com/quic-go/quic-go/wiki/UDP
 
 #### DNS
 
-By default all modes except for the native tunnel mode will use [Quad9](https://quad9.net/) to resolve DNS traffic. While this seems to be an odd choice for a Cloudflare client, I prefer them over `1.1.1.1` because of their privacy claims. I believe it's a decent default. However `1.1.1.1` has better performance usually. You are free to change the DNS server used by the tool by specifying the `-d` flag.
+The proxy modes (`socks`, `http-proxy` and the L4 proxies) resolve target names with **DNS-over-HTTPS** (RFC 8484) to Cloudflare, by default through the MASQUE tunnel (over the host network with `-l`). The endpoints are IP literals (`1.1.1.1`, `1.0.0.1`, then the IPv6 pair), so no plain lookup is needed to find them, and IPv4 is tried first.
 
-For example:
+DNSSEC is checked on every answer (`--dnssec`, default `validate`): each query sets the DNSSEC OK bit, answers the resolver reports as bogus are rejected, and names known to be signed (`api.cloudflareclient.com`) must come back authenticated. `--dnssec strict` requires that for every name; note that some WARP names, such as `engage.cloudflareclient.com`, are not signed. A DNSSEC failure is never retried over plain DNS.
 
 ```shell
-$ ./usque socks -d 1.1.1.1 -d 1.0.0.1 -d 2606:4700:4700::1111 -d 2606:4700:4700::1001
+$ ./usque socks                                             # DoH + DNSSEC validate (default)
+$ ./usque socks --doh-url https://1.1.1.1/dns-query --dnssec strict
+$ ./usque socks --doh=false -d 9.9.9.9 -d 149.112.112.112   # legacy plain UDP/53 to -d
 ```
+
+On Android, every other lookup (including registration against `api.cloudflareclient.com`) also goes through DoH with the same DNSSEC checks, and usque's own TLS connections (registration and DoH) trust only the system CA stores, not user-installed CAs.
 
 Native tunnels will not customize DNS. Whatever you have set on your system will be preferred. Routing of DNS packets to the tunnel or somewhere else is also entirely up to you.
 

@@ -2,11 +2,14 @@ package internal
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"net"
 	"net/http"
 	"os"
 	"time"
+
+	"github.com/Diniboy1123/usque/internal/trust"
 )
 
 // APIClient is the HTTP client used for every api.cloudflareclient.com call
@@ -30,10 +33,15 @@ import (
 // Note this is orthogonal to the --ipv6 flag on socks/http-proxy/native-tun:
 // that selects the address family of the MASQUE *endpoint*, and never applied
 // to the registration API at all.
+//
+// Its TLS roots come from trust.Roots: the registration response carries the
+// endpoint key the tunnel is later pinned to, so on Android a user-installed CA
+// must not be able to intercept it.
 var APIClient = &http.Client{
 	Timeout: 60 * time.Second,
 	Transport: &http.Transport{
 		Proxy:                 http.ProxyFromEnvironment,
+		TLSClientConfig:       &tls.Config{RootCAs: trust.Roots()},
 		DialContext:           dialPreferIPv4,
 		ForceAttemptHTTP2:     true,
 		MaxIdleConns:          10,
