@@ -7,6 +7,7 @@ import (
 	"net/netip"
 	"time"
 
+	"github.com/Diniboy1123/usque/internal/doh"
 	"golang.zx2c4.com/wireguard/tun/netstack"
 )
 
@@ -26,12 +27,24 @@ type TunnelDNSResolver struct {
 	// UseOSResolver, when true, uses net.DefaultResolver for Resolve instead of DNSAddrs.
 	// Set when -l and --system-dns; otherwise with -l, DNSAddrs are queried over the host.
 	UseOSResolver bool
+
+	// DoH, when set, resolves over DNS-over-HTTPS instead of plain UDP/53 to DNSAddrs.
+	// Whether its queries travel through the tunnel is decided by its own dialer.
+	DoH *doh.Client
 }
 
 // Resolve performs a DNS lookup using the provided DNS resolvers.
 // It tries each resolver in order until one succeeds, sending queries either through the tunnel
 // or over the system network depending on TunNet.
 func (r TunnelDNSResolver) Resolve(ctx context.Context, name string) (net.IP, error) {
+	if r.DoH != nil && !r.UseOSResolver {
+		ips, err := r.DoH.LookupIP(ctx, name)
+		if err != nil {
+			return nil, err
+		}
+		return ips[0], nil
+	}
+
 	if r.UseOSResolver {
 		queryCtx := ctx
 		var cancel context.CancelFunc
@@ -149,11 +162,15 @@ func NewStaticResolver(dnsAddrs []netip.Addr) *net.Resolver {
 //
 //   - localDNS: do not use the tunnel for DNS; use dnsAddrs on the host, or OS if systemDNS.
 //   - systemDNS: with localDNS, use net.DefaultResolver (ignores dnsAddrs for lookups).
-func GetProxyResolver(localDNS, systemDNS bool, tunNet *netstack.Net, dnsAddrs []netip.Addr, timeout time.Duration) *net.Resolver {
+//   - dohClient: when set (and not systemDNS), resolve over DNS-over-HTTPS instead of dnsAddrs.
+func GetProxyResolver(localDNS, systemDNS bool, tunNet *netstack.Net, dnsAddrs []netip.Addr, timeout time.Duration, dohClient *doh.Client) *net.Resolver {
+	if localDNS && systemDNS {
+		return net.DefaultResolver
+	}
+	if dohClient != nil {
+		return dohClient.Resolver()
+	}
 	if localDNS {
-		if systemDNS {
-			return net.DefaultResolver
-		}
 		return NewStaticResolver(dnsAddrs)
 	}
 	return NewNetstackResolver(tunNet, dnsAddrs)

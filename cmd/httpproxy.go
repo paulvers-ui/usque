@@ -246,7 +246,18 @@ var httpProxyCmd = &cobra.Command{
 		}
 		defer func() { _ = tunDev.Close() }()
 
-		resolver := internal.GetProxyResolver(localDNS, systemDNS, tunNet, dnsAddrs, dnsTimeout)
+		// DoH queries go through the tunnel, or over the host network with -l.
+		dohNet := tunNet
+		if localDNS {
+			dohNet = nil
+		}
+		dohClient, err := newDoHClient(cmd, dohNet)
+		if err != nil {
+			cmd.Printf("Failed to set up DNS-over-HTTPS: %v\n", err)
+			return
+		}
+
+		resolver := internal.GetProxyResolver(localDNS, systemDNS, tunNet, dnsAddrs, dnsTimeout, dohClient)
 
 		go api.MaintainTunnel(context.Background(), api.MaintainTunnelConfig{
 			TLSConfig:         tlsConfig,
@@ -433,7 +444,7 @@ func init() {
 	httpProxyCmd.Flags().StringP("username", "u", "", "Username for proxy authentication (specify both username and password to enable)")
 	httpProxyCmd.Flags().StringP("password", "w", "", "Password for proxy authentication (specify both username and password to enable)")
 	httpProxyCmd.Flags().IntP("connect-port", "P", 443, "Used port for MASQUE connection")
-	httpProxyCmd.Flags().StringArrayP("dns", "d", []string{"9.9.9.9", "149.112.112.112", "2620:fe::fe", "2620:fe::9"}, "DNS servers for the tunnel stack; with -l also used for proxy name lookups (unless --system-dns)")
+	httpProxyCmd.Flags().StringArrayP("dns", "d", []string{"9.9.9.9", "149.112.112.112", "2620:fe::fe", "2620:fe::9"}, "Plain-DNS (UDP/53) servers for the tunnel stack; used for proxy name lookups only with --doh=false")
 	httpProxyCmd.Flags().DurationP("dns-timeout", "t", 2*time.Second, "Timeout for DNS queries")
 	httpProxyCmd.Flags().BoolP("ipv6", "6", false, "Use IPv6 for MASQUE connection")
 	httpProxyCmd.Flags().BoolP("no-tunnel-ipv4", "F", false, "Disable IPv4 inside the MASQUE tunnel")
@@ -450,5 +461,6 @@ func init() {
 	httpProxyCmd.Flags().Bool("system-dns", false, "With -l, resolve names via the OS (e.g. /etc/resolv.conf) instead of -d")
 	httpProxyCmd.Flags().String("on-connect", "", "Path to an executable to run after each successful tunnel connect (no args; context via USQUE_* env vars)")
 	httpProxyCmd.Flags().String("on-disconnect", "", "Path to an executable to run after each tunnel disconnect (no args; context via USQUE_* env vars)")
+	addDoHFlags(httpProxyCmd)
 	rootCmd.AddCommand(httpProxyCmd)
 }

@@ -130,10 +130,17 @@ func buildL4Proxy(cmd *cobra.Command, mode string) (l4ProxyOptions, *api.L4Proxy
 		"USQUE_IPV6": config.AppConfig.IPv6,
 	}
 
+	// L4 proxies resolve locally (-l), so DoH goes over the host network.
+	dohClient, err := newDoHClient(cmd, nil)
+	if err != nil {
+		return opts, nil, fmt.Errorf("failed to set up DNS-over-HTTPS: %v", err)
+	}
+
 	resolver := &internal.TunnelDNSResolver{
 		DNSAddrs:      dnsAddrs,
 		Timeout:       opts.dnsTimeout,
 		UseOSResolver: opts.localDNS && opts.systemDNS,
+		DoH:           dohClient,
 	}
 
 	proxy, err := api.NewL4Proxy(api.L4ProxyConfig{
@@ -206,7 +213,7 @@ func addL4ProxyFlags(cmd *cobra.Command, defaultPort, proxyName string) {
 	cmd.Flags().StringP("username", "u", "", "Username for proxy authentication (specify both username and password to enable)")
 	cmd.Flags().StringP("password", "w", "", "Password for proxy authentication (specify both username and password to enable)")
 	cmd.Flags().IntP("connect-port", "P", 443, "Used port for MASQUE connection")
-	cmd.Flags().StringArrayP("dns", "d", []string{"9.9.9.9", "149.112.112.112", "2620:fe::fe", "2620:fe::9"}, "DNS servers for local proxy name lookups with -l (unless --system-dns)")
+	cmd.Flags().StringArrayP("dns", "d", []string{"9.9.9.9", "149.112.112.112", "2620:fe::fe", "2620:fe::9"}, "Plain-DNS (UDP/53) servers for local proxy name lookups with -l; used only with --doh=false")
 	cmd.Flags().DurationP("dns-timeout", "t", 2*time.Second, "Timeout for DNS queries")
 	cmd.Flags().BoolP("ipv6", "6", false, "Use IPv6 for MASQUE connection")
 	cmd.Flags().DurationP("keepalive-period", "k", 30*time.Second, "Keepalive period for MASQUE connection")
@@ -216,4 +223,5 @@ func addL4ProxyFlags(cmd *cobra.Command, defaultPort, proxyName string) {
 	cmd.Flags().Bool("system-dns", false, "Resolve names via the OS (e.g. /etc/resolv.conf) instead of -d")
 	cmd.Flags().String("on-connect", "", "Path to an executable to run after each successful L4 CONNECT stream (no args; context via USQUE_* env vars)")
 	cmd.Flags().String("on-disconnect", "", "Path to an executable to run after each L4 CONNECT stream closes (no args; context via USQUE_* env vars)")
+	addDoHFlags(cmd)
 }
