@@ -159,6 +159,31 @@ const pumpShutdownGrace = 2 * time.Second
 // byte before packets lets connect-ip-go send outbound datagrams in place.
 const datagramContextIDHeadroom = 1
 
+// oversizeLogInterval bounds how often dropped oversize packets are logged.
+const oversizeLogInterval = 30 * time.Second
+
+// oversizeLog reports tunnel packets that did not fit in a QUIC DATAGRAM. connect-ip-go
+// drops them and hands back an ICMP Packet Too Big, which netstack ignores, so without
+// this log the only symptom is TCP connections through the tunnel stalling.
+type oversizeLog struct {
+	mu      sync.Mutex
+	last    time.Time
+	dropped int
+}
+
+// note records one dropped packet of size bytes and logs the count at most once per
+// oversizeLogInterval.
+func (o *oversizeLog) note(size int) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.dropped++
+	if now := time.Now(); now.Sub(o.last) >= oversizeLogInterval {
+		log.Printf("Dropped %d tunnel packet(s) too large for a QUIC datagram (latest: %d bytes); raise --initial-packet-size or lower --mtu", o.dropped, size)
+		o.last = now
+		o.dropped = 0
+	}
+}
+
 // MaintainTunnelConfig contains runtime settings for tunnel maintenance.
 type MaintainTunnelConfig struct {
 	TLSConfig         *tls.Config
@@ -231,10 +256,22 @@ func MaintainTunnel(ctx context.Context, cfg MaintainTunnelConfig) {
 	}
 
 	packetBufferPool := NewNetBuffer(cfg.MTU + datagramContextIDHeadroom)
+	var oversize oversizeLog
 
 	for {
 		if ctx.Err() != nil {
 			return
+		}
+
+		// The packet that ends the idle wait is sent first once connected, so the
+		// connection it belongs to does not wait for a retransmit.
+		var wakeBuf []byte
+		var wakeLen int
+		dropWake := func() {
+			if wakeBuf != nil {
+				packetBufferPool.Put(wakeBuf)
+				wakeBuf = nil
+			}
 		}
 
 		if !cfg.AlwaysReconnect {
@@ -249,7 +286,7 @@ func MaintainTunnel(ctx context.Context, cfg MaintainTunnelConfig) {
 				}
 				continue
 			}
-			packetBufferPool.Put(buf)
+			wakeBuf, wakeLen = buf, n
 			log.Printf("Detected outbound activity (%d bytes). Reconnecting...", n)
 		}
 
@@ -264,6 +301,7 @@ func MaintainTunnel(ctx context.Context, cfg MaintainTunnelConfig) {
 		)
 		if err != nil {
 			log.Printf("Failed to connect tunnel: %v", err)
+			dropWake()
 			if ipConn != nil {
 				_ = ipConn.Close()
 			}
@@ -280,6 +318,7 @@ func MaintainTunnel(ctx context.Context, cfg MaintainTunnelConfig) {
 		}
 		if rsp.StatusCode != 200 {
 			log.Printf("Tunnel connection failed: %s", rsp.Status)
+			dropWake()
 			_ = ipConn.Close()
 			if tr != nil {
 				_ = tr.Close()
@@ -311,6 +350,37 @@ func MaintainTunnel(ctx context.Context, cfg MaintainTunnelConfig) {
 
 		go func() {
 			defer wg.Done()
+			// forward sends the n-byte packet stored after the headroom in buf, then
+			// returns buf to the pool. It returns false when the pump must stop.
+			forward := func(buf []byte, n int) bool {
+				icmp, err := ipConn.WritePacketBuffer(buf, datagramContextIDHeadroom, n)
+				packetBufferPool.Put(buf)
+				if err != nil {
+					if errors.As(err, new(*connectip.CloseError)) {
+						errChan <- fmt.Errorf("connection closed while writing to IP connection: %w", err)
+						return false
+					}
+					log.Printf("Error writing to IP connection: %v, continuing...", err)
+					return true
+				}
+
+				if len(icmp) > 0 {
+					// connect-ip-go only returns an ICMP packet for a packet too large to send.
+					oversize.note(n)
+					if err := cfg.Device.WritePacket(icmp); err != nil {
+						if errors.As(err, new(*connectip.CloseError)) {
+							errChan <- fmt.Errorf("connection closed while writing ICMP to TUN device: %w", err)
+							return false
+						}
+						log.Printf("Error writing ICMP to TUN device: %v, continuing...", err)
+					}
+				}
+				return true
+			}
+
+			if wakeBuf != nil && !forward(wakeBuf, wakeLen) {
+				return
+			}
 			for {
 				if pumpCtx.Err() != nil {
 					return
@@ -328,26 +398,8 @@ func MaintainTunnel(ctx context.Context, cfg MaintainTunnelConfig) {
 					packetBufferPool.Put(buf)
 					return
 				}
-				icmp, err := ipConn.WritePacketBuffer(buf, datagramContextIDHeadroom, n)
-				if err != nil {
-					packetBufferPool.Put(buf)
-					if errors.As(err, new(*connectip.CloseError)) {
-						errChan <- fmt.Errorf("connection closed while writing to IP connection: %w", err)
-						return
-					}
-					log.Printf("Error writing to IP connection: %v, continuing...", err)
-					continue
-				}
-				packetBufferPool.Put(buf)
-
-				if len(icmp) > 0 {
-					if err := cfg.Device.WritePacket(icmp); err != nil {
-						if errors.As(err, new(*connectip.CloseError)) {
-							errChan <- fmt.Errorf("connection closed while writing ICMP to TUN device: %w", err)
-							return
-						}
-						log.Printf("Error writing ICMP to TUN device: %v, continuing...", err)
-					}
+				if !forward(buf, n) {
+					return
 				}
 			}
 		}()
