@@ -23,6 +23,7 @@ import (
 	"github.com/Diniboy1123/usque/internal/doh"
 	"golang.zx2c4.com/wireguard/device"
 	"golang.zx2c4.com/wireguard/tun/netstack"
+	"gvisor.dev/gvisor/pkg/tcpip/adapters/gonet"
 )
 
 const (
@@ -55,16 +56,37 @@ func UnderlayOf(n *netstack.Net) *api.Underlay {
 		return nil
 	}
 	return &api.Underlay{
-		ListenPacket: func(ipv6 bool) (net.PacketConn, error) {
-			a := netip.IPv4Unspecified()
-			if ipv6 {
-				a = netip.IPv6Unspecified()
+		ListenPacket: func(endpoint *net.UDPAddr) (net.PacketConn, error) {
+			ap, ok := netip.AddrFromSlice(endpoint.IP)
+			if !ok {
+				return nil, fmt.Errorf("chain: bad endpoint %v", endpoint)
 			}
-			return n.ListenUDPAddrPort(netip.AddrPortFrom(a, 0))
+			// netstack only routes *connected* UDP, so dial the endpoint and
+			// wrap the conn so quic-go's WriteTo(addr) always targets it.
+			uc, err := n.DialUDPAddrPort(netip.AddrPort{}, netip.AddrPortFrom(ap.Unmap(), uint16(endpoint.Port)))
+			if err != nil {
+				return nil, err
+			}
+			return &fixedDestPacketConn{UDPConn: uc, remote: endpoint}, nil
 		},
 		DialContext: n.DialContext,
 	}
 }
+
+// fixedDestPacketConn wraps a connected netstack UDP conn as a net.PacketConn
+// whose sends always go to the dialed remote (ignoring the addr quic-go passes)
+// and whose receives report that remote as the source.
+type fixedDestPacketConn struct {
+	*gonet.UDPConn
+	remote *net.UDPAddr
+}
+
+func (c *fixedDestPacketConn) WriteTo(b []byte, _ net.Addr) (int, error) { return c.UDPConn.Write(b) }
+func (c *fixedDestPacketConn) ReadFrom(b []byte) (int, net.Addr, error) {
+	n, err := c.UDPConn.Read(b)
+	return n, c.remote, err
+}
+func (c *fixedDestPacketConn) LocalAddr() net.Addr { return c.UDPConn.LocalAddr() }
 
 // StartWarp brings up a MASQUE hop over under (nil = host network) and returns
 // the userspace stack that dials through it.

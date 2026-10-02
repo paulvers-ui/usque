@@ -24,18 +24,20 @@ import (
 // (or nil fields) means the host network, which is the historical behaviour.
 // Setting it lets one tunnel ride inside another (see the chain command).
 type Underlay struct {
-	// ListenPacket returns an unconnected UDP socket for QUIC (HTTP/3 mode).
-	// ipv6 tells which family the endpoint uses.
-	ListenPacket func(ipv6 bool) (net.PacketConn, error)
+	// ListenPacket returns the UDP socket QUIC (HTTP/3 mode) runs over, already
+	// able to reach endpoint. Over the host network this is an unconnected
+	// socket; over another tunnel's netstack it is a connected socket wrapped so
+	// every send goes to endpoint (netstack only routes connected UDP).
+	ListenPacket func(endpoint *net.UDPAddr) (net.PacketConn, error)
 	// DialContext dials TCP for HTTP/2 mode.
 	DialContext func(ctx context.Context, network, address string) (net.Conn, error)
 }
 
-func (u *Underlay) listenPacket(ipv6 bool) (net.PacketConn, error) {
+func (u *Underlay) listenPacket(endpoint *net.UDPAddr) (net.PacketConn, error) {
 	if u != nil && u.ListenPacket != nil {
-		return u.ListenPacket(ipv6)
+		return u.ListenPacket(endpoint)
 	}
-	if ipv6 {
+	if endpoint.IP.To4() == nil {
 		return net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv6zero})
 	}
 	return net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4zero})
@@ -199,7 +201,7 @@ func ConnectTunnelOver(ctx context.Context, tlsConfig *tls.Config, quicConfig *q
 }
 
 func connectTunnelHTTP3(ctx context.Context, tlsConfig *tls.Config, quicConfig *quic.Config, template *uritemplate.Template, additionalHeaders http.Header, endpoint *net.UDPAddr, ul *Underlay) (net.PacketConn, *http3.Transport, *connectip.Conn, *http.Response, error) {
-	udpConn, err := ul.listenPacket(endpoint.IP.To4() == nil)
+	udpConn, err := ul.listenPacket(endpoint)
 	if err != nil {
 		return nil, nil, nil, nil, err
 	}
