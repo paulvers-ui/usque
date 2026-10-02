@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/netip"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -34,6 +35,9 @@ type wireBind struct {
 	dev  tun.Device
 	self netip.AddrPort
 	in   chan wirePkt
+
+	mu   sync.Mutex
+	done chan struct{} // closed by Close to stop the receive func
 }
 
 func newWireBind(dev tun.Device, self netip.AddrPort) *wireBind {
@@ -75,20 +79,35 @@ func (w *wireBind) pump() {
 }
 
 func (w *wireBind) Open(uint16) ([]conn.ReceiveFunc, uint16, error) {
+	done := make(chan struct{})
+	w.mu.Lock()
+	w.done = done
+	w.mu.Unlock()
 	fn := func(bufs [][]byte, sizes []int, eps []conn.Endpoint) (int, error) {
-		p, ok := <-w.in
-		if !ok {
+		select {
+		case p := <-w.in:
+			sizes[0] = copy(bufs[0], p.b)
+			eps[0] = &memEndpoint{a: p.from}
+			return 1, nil
+		case <-done:
 			return 0, net.ErrClosed
 		}
-		sizes[0] = copy(bufs[0], p.b)
-		eps[0] = &memEndpoint{a: p.from}
-		return 1, nil
 	}
 	return []conn.ReceiveFunc{fn}, w.self.Port(), nil
 }
 
-// Close is a no-op: wireguard-go closes the bind before every Open.
-func (w *wireBind) Close() error         { return nil }
+// Close stops the receive func; the pump keeps running for a later Open
+// (wireguard-go closes the bind before every Open).
+func (w *wireBind) Close() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.done != nil {
+		close(w.done)
+		w.done = nil
+	}
+	return nil
+}
+
 func (w *wireBind) SetMark(uint32) error { return nil }
 func (w *wireBind) BatchSize() int       { return 1 }
 
