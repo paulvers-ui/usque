@@ -291,8 +291,7 @@ func watchHandshake(ctx context.Context, dev *device.Device, ep netip.AddrPort) 
 }
 
 func hasHandshake(uapi string) bool {
-	for _, line := range strings.Split(uapi, "
-") {
+	for _, line := range strings.Split(uapi, "\n") {
 		if v, ok := strings.CutPrefix(line, "last_handshake_time_sec="); ok && v != "0" {
 			return true
 		}
