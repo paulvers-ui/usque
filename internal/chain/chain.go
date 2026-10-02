@@ -30,8 +30,6 @@ const (
 	// wgOverhead4/6: WireGuard data header+tag (32) + UDP (8) + IP header.
 	wgOverhead4 = 32 + 8 + 20
 	wgOverhead6 = 32 + 8 + 40
-	// quicMinPacket is the smallest UDP payload QUIC is allowed to run over.
-	quicMinPacket = 1200
 )
 
 // WarpHop configures one MASQUE hop.
@@ -81,9 +79,9 @@ type fixedDestPacketConn struct {
 	remote *net.UDPAddr
 }
 
-func (c *fixedDestPacketConn) WriteTo(b []byte, _ net.Addr) (int, error) { return c.UDPConn.Write(b) }
+func (c *fixedDestPacketConn) WriteTo(b []byte, _ net.Addr) (int, error) { return c.Write(b) }
 func (c *fixedDestPacketConn) ReadFrom(b []byte) (int, net.Addr, error) {
-	n, err := c.UDPConn.Read(b)
+	n, err := c.Read(b)
 	return n, c.remote, err
 }
 func (c *fixedDestPacketConn) LocalAddr() net.Addr { return c.UDPConn.LocalAddr() }

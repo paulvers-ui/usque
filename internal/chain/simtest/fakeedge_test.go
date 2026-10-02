@@ -37,7 +37,6 @@ type pipePacketConn struct {
 	local  net.Addr
 	mu     sync.Mutex
 	closed bool
-	rdl    time.Time
 }
 type pkt struct {
 	b    []byte

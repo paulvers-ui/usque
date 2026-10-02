@@ -134,16 +134,6 @@ func TestWarpOverUnderlay(t *testing.T) {
 
 func outerTLS1(t *testing.T, c *config.Config) string { return c.EndpointPubKey }
 
-type waterish struct {
-	d interface {
-		ReadPacket([]byte) (int, error)
-		WritePacket([]byte) error
-	}
-}
-
-func (w waterish) ReadPacket(b []byte) (int, error) { return w.d.ReadPacket(b) }
-func (w waterish) WritePacket(b []byte) error       { return w.d.WritePacket(b) }
-
 func echoSrc(ln net.Listener) {
 	for {
 		c, err := ln.Accept()
@@ -151,7 +141,7 @@ func echoSrc(ln net.Listener) {
 			return
 		}
 		go func(c net.Conn) {
-			defer c.Close()
+			defer func() { _ = c.Close() }()
 			_, _ = c.Write([]byte("seen-from=" + hostOnly(c.RemoteAddr().String())))
 		}(c)
 	}
@@ -173,7 +163,7 @@ func dialEchoThrough(ctx context.Context, t *testing.T, tnet *netstack.Net, ip n
 	if err != nil {
 		t.Fatalf("dial through tunnel: %v", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	_ = conn.SetReadDeadline(time.Now().Add(10 * time.Second))
 	b, _ := io.ReadAll(conn)
 	return string(b)
