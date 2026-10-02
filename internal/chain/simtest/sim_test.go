@@ -134,8 +134,8 @@ func TestWireGuardOverUserspaceStack(t *testing.T) {
 				return
 			}
 			go func(c net.Conn) {
-				defer c.Close()
-				fmt.Fprintf(c, "seen-from=%s", c.RemoteAddr().String())
+				defer func() { _ = c.Close() }()
+				_, _ = fmt.Fprintf(c, "seen-from=%s", c.RemoteAddr().String())
 			}(c)
 		}
 	}()
@@ -147,7 +147,7 @@ func TestWireGuardOverUserspaceStack(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial through wg0 failed: %v", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	buf, _ := io.ReadAll(conn)
 	got := string(buf)
 	t.Logf("origin reply: %q", got)
