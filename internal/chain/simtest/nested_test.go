@@ -14,25 +14,6 @@ import (
 	"golang.zx2c4.com/wireguard/tun/netstack"
 )
 
-// udpConnPacketConn adapts a *gonet.UDPConn (connected, inside an outer tunnel
-// stack) to net.PacketConn so quic-go's server can listen on it. All reads come
-// from the one remote; writes ignore addr.
-type udpConnPacketConn struct {
-	c      net.Conn
-	remote net.Addr
-}
-
-func (u *udpConnPacketConn) ReadFrom(p []byte) (int, net.Addr, error) {
-	n, err := u.c.Read(p)
-	return n, u.remote, err
-}
-func (u *udpConnPacketConn) WriteTo(p []byte, _ net.Addr) (int, error) { return u.c.Write(p) }
-func (u *udpConnPacketConn) Close() error                              { return u.c.Close() }
-func (u *udpConnPacketConn) LocalAddr() net.Addr                       { return u.c.LocalAddr() }
-func (u *udpConnPacketConn) SetDeadline(t time.Time) error             { return u.c.SetDeadline(t) }
-func (u *udpConnPacketConn) SetReadDeadline(t time.Time) error         { return u.c.SetReadDeadline(t) }
-func (u *udpConnPacketConn) SetWriteDeadline(t time.Time) error        { return u.c.SetWriteDeadline(t) }
-
 // TestTwoWarpHopsNested proves the real composition: tunnel A over a pipe, then
 // tunnel B whose QUIC runs INSIDE tunnel A's stack, reaching an origin behind
 // B's edge. The origin must see B's assigned address -- i.e. the second WARP

@@ -10,8 +10,6 @@ import (
 	"golang.zx2c4.com/wireguard/device"
 )
 
-func cryptoRead(b []byte) (int, error) { return crand.Read(b) }
-
 func key(t *testing.T) (priv device.NoisePrivateKey, pub device.NoisePublicKey) {
 	t.Helper()
 	if _, err := crand.Read(priv[:]); err != nil {
