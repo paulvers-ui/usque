@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	connectip "github.com/Diniboy1123/connect-ip-go"
 	"github.com/quic-go/quic-go"
@@ -18,6 +19,34 @@ import (
 	"github.com/yosida95/uritemplate/v3"
 	"golang.org/x/net/http2"
 )
+
+// Underlay supplies the sockets a MASQUE connection runs over. A nil Underlay
+// (or nil fields) means the host network, which is the historical behaviour.
+// Setting it lets one tunnel ride inside another (see the chain command).
+type Underlay struct {
+	// ListenPacket returns an unconnected UDP socket for QUIC (HTTP/3 mode).
+	// ipv6 tells which family the endpoint uses.
+	ListenPacket func(ipv6 bool) (net.PacketConn, error)
+	// DialContext dials TCP for HTTP/2 mode.
+	DialContext func(ctx context.Context, network, address string) (net.Conn, error)
+}
+
+func (u *Underlay) listenPacket(ipv6 bool) (net.PacketConn, error) {
+	if u != nil && u.ListenPacket != nil {
+		return u.ListenPacket(ipv6)
+	}
+	if ipv6 {
+		return net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv6zero})
+	}
+	return net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4zero})
+}
+
+func (u *Underlay) dialContext(ctx context.Context, network, address string) (net.Conn, error) {
+	if u != nil && u.DialContext != nil {
+		return u.DialContext(ctx, network, address)
+	}
+	return (&net.Dialer{}).DialContext(ctx, network, address)
+}
 
 // PrepareTlsConfig creates a TLS configuration using the provided certificate and SNI (Server Name Indication).
 // It also verifies the peer's public key against the provided public key.
@@ -107,6 +136,15 @@ func PrepareTlsConfig(privKey *ecdsa.PrivateKey, peerPubKey *ecdsa.PublicKey, ce
 //   - *http.Response: The response from the Connect-IP handshake.
 //   - error: An error if the connection setup fails.
 func ConnectTunnel(ctx context.Context, tlsConfig *tls.Config, quicConfig *quic.Config, connectUri string, endpoint net.Addr, useHTTP2 bool) (*net.UDPConn, *http3.Transport, *connectip.Conn, *http.Response, error) {
+	sock, tr, ipConn, rsp, err := ConnectTunnelOver(ctx, tlsConfig, quicConfig, connectUri, endpoint, useHTTP2, nil)
+	udpConn, _ := sock.(*net.UDPConn)
+	return udpConn, tr, ipConn, rsp, err
+}
+
+// ConnectTunnelOver is ConnectTunnel with the transport sockets taken from ul
+// (nil = host network). The returned io.Closer is the UDP socket in HTTP/3
+// mode and nil in HTTP/2 mode.
+func ConnectTunnelOver(ctx context.Context, tlsConfig *tls.Config, quicConfig *quic.Config, connectUri string, endpoint net.Addr, useHTTP2 bool, ul *Underlay) (net.PacketConn, *http3.Transport, *connectip.Conn, *http.Response, error) {
 	template := uritemplate.MustNew(connectUri)
 	additionalHeaders := http.Header{
 		"User-Agent": []string{""},
@@ -123,7 +161,7 @@ func ConnectTunnel(ctx context.Context, tlsConfig *tls.Config, quicConfig *quic.
 		// TODO: support PQC
 		h2Headers.Set("pq-enabled", "false")
 
-		h2Client, err := newHTTP2Client(tlsConfig, h2Endpoint, connectUri)
+		h2Client, err := newHTTP2Client(tlsConfig, h2Endpoint, connectUri, ul)
 		if err != nil {
 			return nil, nil, nil, nil, fmt.Errorf("failed to create HTTP/2 client: %w", err)
 		}
@@ -145,7 +183,7 @@ func ConnectTunnel(ctx context.Context, tlsConfig *tls.Config, quicConfig *quic.
 
 	var lastErr error
 	for attempt := 0; attempt < 2; attempt++ {
-		udpConn, tr, ipConn, rsp, err := connectTunnelHTTP3(ctx, tlsConfig, quicConfig, template, additionalHeaders, quicEndpoint)
+		udpConn, tr, ipConn, rsp, err := connectTunnelHTTP3(ctx, tlsConfig, quicConfig, template, additionalHeaders, quicEndpoint, ul)
 		if err == nil {
 			return udpConn, tr, ipConn, rsp, nil
 		}
@@ -160,22 +198,10 @@ func ConnectTunnel(ctx context.Context, tlsConfig *tls.Config, quicConfig *quic.
 	return nil, nil, nil, nil, fmt.Errorf("failed to dial connect-ip: %w", lastErr)
 }
 
-func connectTunnelHTTP3(ctx context.Context, tlsConfig *tls.Config, quicConfig *quic.Config, template *uritemplate.Template, additionalHeaders http.Header, endpoint *net.UDPAddr) (*net.UDPConn, *http3.Transport, *connectip.Conn, *http.Response, error) {
-	var udpConn *net.UDPConn
-	var err error
-	if endpoint.IP.To4() == nil {
-		udpConn, err = net.ListenUDP("udp", &net.UDPAddr{
-			IP:   net.IPv6zero,
-			Port: 0,
-		})
-	} else {
-		udpConn, err = net.ListenUDP("udp", &net.UDPAddr{
-			IP:   net.IPv4zero,
-			Port: 0,
-		})
-	}
+func connectTunnelHTTP3(ctx context.Context, tlsConfig *tls.Config, quicConfig *quic.Config, template *uritemplate.Template, additionalHeaders http.Header, endpoint *net.UDPAddr, ul *Underlay) (net.PacketConn, *http3.Transport, *connectip.Conn, *http.Response, error) {
+	udpConn, err := ul.listenPacket(endpoint.IP.To4() == nil)
 	if err != nil {
-		return udpConn, nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 
 	// without ConnectionIDLength set, backend occasionally throws PROTOCOL_VIOLATION
@@ -222,7 +248,7 @@ func isRetryableHTTP3ConnectFailure(err error) bool {
 
 // newHTTP2Client builds an HTTP client for CONNECT-IP over HTTP/2.
 // It honors proxy environment variables and pins dialing to the selected endpoint.
-func newHTTP2Client(baseTLSConfig *tls.Config, endpoint *net.TCPAddr, connectURI string) (*http.Client, error) {
+func newHTTP2Client(baseTLSConfig *tls.Config, endpoint *net.TCPAddr, connectURI string, ul *Underlay) (*http.Client, error) {
 	if endpoint == nil {
 		return nil, errors.New("missing HTTP/2 endpoint")
 	}
@@ -237,11 +263,14 @@ func newHTTP2Client(baseTLSConfig *tls.Config, endpoint *net.TCPAddr, connectURI
 	tlsConfig := baseTLSConfig.Clone()
 	tlsConfig.NextProtos = []string{"h2"}
 
-	if proxyURL == nil {
+	if proxyURL == nil || ul != nil {
 		transport := &http2.Transport{
+			// Ping an idle connection so a dead tunnel underneath (e.g. a hop
+			// of the chain) is noticed instead of hanging forever.
+			ReadIdleTimeout: 20 * time.Second,
+			PingTimeout:     10 * time.Second,
 			DialTLSContext: func(ctx context.Context, network, _ string, _ *tls.Config) (net.Conn, error) {
-				dialer := &net.Dialer{}
-				conn, err := dialer.DialContext(ctx, network, endpoint.String())
+				conn, err := ul.dialContext(ctx, network, endpoint.String())
 				if err != nil {
 					return nil, err
 				}
