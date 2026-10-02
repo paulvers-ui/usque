@@ -1,0 +1,99 @@
+# Builds libusque.so (android/arm64) WITH the `chain` subcommand, for the
+# rethink-app-masque Chain mode UI. Drop the artifact into the app's
+# app/src/main/jniLibs/arm64-v8a/ directory.
+name: Android chain .so
+
+on:
+  push:
+    branches: [split, main, b2]
+    paths:
+      - '**.go'
+      - 'go.mod'
+      - 'go.sum'
+      - '.github/workflows/android-chain.yml'
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Git ref to build (branch, tag or SHA)
+        required: false
+        default: split
+
+permissions:
+  contents: read
+
+jobs:
+  build-android-arm64:
+    name: Build libusque.so (android/arm64)
+    runs-on: ubuntu-latest
+    env:
+      GOOS: android
+      GOARCH: arm64
+      CGO_ENABLED: "0"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.ref || github.ref }}
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Sanity — chain subcommand present
+        run: |
+          test -f cmd/chain.go || { echo "::error::cmd/chain.go missing — wrong branch? The chain lives on 'split'."; exit 1; }
+
+      - name: Build libusque.so
+        run: |
+          set -eux
+          mkdir -p out
+          # -trimpath for reproducibility; -s -w to strip, matching the app's size budget.
+          go build -trimpath -ldflags="-s -w" -o out/libusque.so .
+          ls -la out/
+          file out/libusque.so || true
+
+      - name: Record build info
+        run: |
+          {
+            echo "ref: ${{ github.event.inputs.ref || github.ref }}"
+            echo "sha: ${{ github.sha }}"
+            echo "go:  $(go version)"
+            echo "size: $(stat -c%s out/libusque.so) bytes"
+            echo "sha256: $(sha256sum out/libusque.so | cut -d' ' -f1)"
+          } | tee out/libusque.so.buildinfo.txt
+
+      - name: Verify it is an arm64 ELF (not a host binary)
+        run: |
+          set -e
+          hdr=$(od -An -tx1 -N20 out/libusque.so | tr -d ' \n')
+          # ELF magic 7f454c46, class 2 (64-bit) at byte 4, machine 0x00b7 (AArch64) at bytes 18-19 (LE).
+          case "$hdr" in
+            7f454c46*) echo "ELF OK" ;;
+            *) echo "::error::not an ELF binary"; exit 1 ;;
+          esac
+          # e_machine is at offset 18 (little-endian): expect b700
+          mach=$(od -An -tx1 -j18 -N2 out/libusque.so | tr -d ' \n')
+          test "$mach" = "b700" || { echo "::error::e_machine=$mach, expected b700 (AArch64)"; exit 1; }
+          echo "AArch64 OK"
+
+      - name: Upload libusque.so
+        uses: actions/upload-artifact@v4
+        with:
+          name: libusque-android-arm64-${{ github.sha }}
+          path: |
+            out/libusque.so
+            out/libusque.so.buildinfo.txt
+          retention-days: 30
+          if-no-files-found: error
+
+      # On a tag, also attach the .so to the GitHub Release so the app's CI (or
+      # you) can pull a stable URL instead of a per-run artifact.
+      - name: Attach to release (tags only)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            out/libusque.so
+            out/libusque.so.buildinfo.txt
