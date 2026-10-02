@@ -147,9 +147,10 @@ jobs:
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git commit -m "chore(usque): libusque.so arm64 from usque@${SRC_SHA} (with chain subcommand)"
+          # Always qualify the ref: the app repo also has a tag named "main".
           for i in 1 2 3; do
-            git push origin "HEAD:${APP_BRANCH}" && break
-            git pull --rebase origin "$APP_BRANCH"
+            git push origin "HEAD:refs/heads/${APP_BRANCH}" && break
+            git pull --rebase origin "refs/heads/${APP_BRANCH}"
           done
           git ls-remote origin "refs/heads/${APP_BRANCH}"
           echo "::notice::Published libusque.so from usque@${SRC_SHA} to ${APP_REPO}@${APP_BRANCH}/${JNI_DIR}"
