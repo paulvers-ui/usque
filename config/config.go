@@ -54,6 +54,23 @@ func LoadConfig(configPath string) error {
 	return nil
 }
 
+// LoadConfigFile reads a configuration JSON file into a new Config without
+// touching the global AppConfig. Used when more than one WARP identity is in
+// play (e.g. the exit hop of the chain command).
+func LoadConfigFile(configPath string) (*Config, error) {
+	file, err := os.Open(configPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open config file: %v", err)
+	}
+	defer func() { _ = file.Close() }()
+
+	var c Config
+	if err := json.NewDecoder(file).Decode(&c); err != nil {
+		return nil, fmt.Errorf("failed to decode config file %s: %v", configPath, err)
+	}
+	return &c, nil
+}
+
 // SaveConfig writes the current application configuration to a prettified JSON file.
 //
 // Parameters:
@@ -82,8 +99,8 @@ func (*Config) SaveConfig(configPath string) error {
 // Returns:
 //   - *ecdsa.PrivateKey: The parsed ECDSA private key.
 //   - error: An error if decoding or parsing the private key fails.
-func (*Config) GetEcPrivateKey() (*ecdsa.PrivateKey, error) {
-	privKeyB64, err := base64.StdEncoding.DecodeString(AppConfig.PrivateKey)
+func (c *Config) GetEcPrivateKey() (*ecdsa.PrivateKey, error) {
+	privKeyB64, err := base64.StdEncoding.DecodeString(c.PrivateKey)
 	if err != nil {
 		return nil, fmt.Errorf("failed to decode private key: %v", err)
 	}
@@ -101,8 +118,8 @@ func (*Config) GetEcPrivateKey() (*ecdsa.PrivateKey, error) {
 // Returns:
 //   - *ecdsa.PublicKey: The parsed ECDSA public key.
 //   - error: An error if decoding or parsing the public key fails.
-func (*Config) GetEcEndpointPublicKey() (*ecdsa.PublicKey, error) {
-	endpointPubKeyB64, _ := pem.Decode([]byte(AppConfig.EndpointPubKey))
+func (c *Config) GetEcEndpointPublicKey() (*ecdsa.PublicKey, error) {
+	endpointPubKeyB64, _ := pem.Decode([]byte(c.EndpointPubKey))
 	if endpointPubKeyB64 == nil {
 		return nil, fmt.Errorf("failed to decode endpoint public key")
 	}

@@ -195,6 +195,9 @@ type MaintainTunnelConfig struct {
 	ReconnectDelay    time.Duration
 	AlwaysReconnect   bool
 	UseHTTP2          bool
+	// Underlay, when set, carries the MASQUE connection over another tunnel
+	// instead of the host network.
+	Underlay *Underlay
 	// OnConnect is a path to an executable run after every successful tunnel
 	// connect. It is exec'd directly (no shell, no args) and runs fire-and-forget.
 	OnConnect string
@@ -291,13 +294,14 @@ func MaintainTunnel(ctx context.Context, cfg MaintainTunnelConfig) {
 		}
 
 		log.Printf("Establishing MASQUE connection to %s", cfg.Endpoint)
-		udpConn, tr, ipConn, rsp, err := ConnectTunnel(
+		udpConn, tr, ipConn, rsp, err := ConnectTunnelOver(
 			ctx,
 			cfg.TLSConfig,
 			internal.DefaultQuicConfig(cfg.KeepalivePeriod, cfg.InitialPacketSize),
 			internal.ConnectURI,
 			cfg.Endpoint,
 			cfg.UseHTTP2,
+			cfg.Underlay,
 		)
 		if err != nil {
 			log.Printf("Failed to connect tunnel: %v", err)
