@@ -1,6 +1,11 @@
 # Builds libusque.so (android/arm64) WITH the `chain` subcommand, for the
-# rethink-app-masque Chain mode UI. Drop the artifact into the app's
-# app/src/main/jniLibs/arm64-v8a/ directory.
+# rethink-app-masque Chain mode UI, and publishes it straight into the app's
+# app/src/main/jniLibs/arm64-v8a/ (on every push to main, or on demand).
+#
+# Publishing needs a repo secret APP_REPO_TOKEN: a PAT with Contents: read &
+# write on paulvers-ui/rethink-app-masque (GITHUB_TOKEN cannot push to another
+# repo). The previous .so is kept as libusque.so.prev; libusque.so.bak is never
+# touched.
 name: Android chain .so
 
 on:
@@ -17,10 +22,22 @@ on:
       ref:
         description: Git ref to build (branch, tag or SHA)
         required: false
-        default: split
+        default: main
+      push_to_app:
+        description: Commit the .so into rethink-app-masque jniLibs
+        type: boolean
+        default: true
+      app_branch:
+        description: rethink-app-masque branch to commit to
+        required: false
+        default: main
 
 permissions:
   contents: read
+
+concurrency:
+  group: android-chain-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   build-android-arm64:
@@ -43,7 +60,7 @@ jobs:
 
       - name: Sanity — chain subcommand present
         run: |
-          test -f cmd/chain.go || { echo "::error::cmd/chain.go missing — wrong branch? The chain lives on 'split'."; exit 1; }
+          test -f cmd/chain.go || { echo "::error::cmd/chain.go missing — wrong ref? The chain is on main since #6."; exit 1; }
 
       - name: Build libusque.so
         run: |
@@ -97,3 +114,43 @@ jobs:
           files: |
             out/libusque.so
             out/libusque.so.buildinfo.txt
+
+      - name: Publish to rethink-app-masque jniLibs
+        if: >-
+          (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+          (github.event_name == 'workflow_dispatch' && inputs.push_to_app)
+        env:
+          APP_TOKEN: ${{ secrets.APP_REPO_TOKEN }}
+          APP_REPO: paulvers-ui/rethink-app-masque
+          APP_BRANCH: ${{ inputs.app_branch || 'main' }}
+          JNI_DIR: app/src/main/jniLibs/arm64-v8a
+        run: |
+          set -eu
+          if [ -z "$APP_TOKEN" ]; then
+            echo "::error::Secret APP_REPO_TOKEN is not set. Add a PAT with Contents read/write on $APP_REPO under Settings -> Secrets and variables -> Actions."
+            exit 1
+          fi
+          SRC_SHA=$(git rev-parse --short HEAD)
+          git clone --depth 1 --branch "$APP_BRANCH"             "https://x-access-token:${APP_TOKEN}@github.com/${APP_REPO}.git" _app
+          cd _app
+          mkdir -p "$JNI_DIR"
+          if [ -f "$JNI_DIR/libusque.so" ] && ! cmp -s "$JNI_DIR/libusque.so" ../out/libusque.so; then
+            cp -f "$JNI_DIR/libusque.so" "$JNI_DIR/libusque.so.prev"
+          fi
+          cp -f ../out/libusque.so "$JNI_DIR/libusque.so"
+          (cd "$JNI_DIR" && sha256sum libusque.so > libusque.so.working.sha256)
+          git add "$JNI_DIR"
+          if git diff --cached --quiet; then
+            echo "::notice::libusque.so on $APP_REPO@$APP_BRANCH already matches usque@$SRC_SHA, nothing to commit"
+            exit 0
+          fi
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git commit -m "chore(usque): libusque.so arm64 from usque@${SRC_SHA} (with chain subcommand)"
+          # Always qualify the ref: the app repo also has a tag named "main".
+          for i in 1 2 3; do
+            git push origin "HEAD:refs/heads/${APP_BRANCH}" && break
+            git pull --rebase origin "refs/heads/${APP_BRANCH}"
+          done
+          git ls-remote origin "refs/heads/${APP_BRANCH}"
+          echo "::notice::Published libusque.so from usque@${SRC_SHA} to ${APP_REPO}@${APP_BRANCH}/${JNI_DIR}"
