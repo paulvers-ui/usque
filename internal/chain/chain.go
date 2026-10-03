@@ -15,6 +15,7 @@ import (
 	"log"
 	"net"
 	"net/netip"
+	"strings"
 	"time"
 
 	"github.com/Diniboy1123/usque/api"
@@ -259,9 +260,43 @@ func StartWG(ctx context.Context, h WGHop, under *netstack.Net) (*netstack.Net, 
 		dev.Close()
 		return nil, 0, fmt.Errorf("wg0: %w", err)
 	}
-	log.Printf("chain: wg0 up: peer %s, inner MTU %d, keepalive %ds", ep, mtu, keepalive)
+	log.Printf("chain: wg0 started: peer %s, inner MTU %d, keepalive %ds (waiting for handshake)", ep, mtu, keepalive)
 	go func() { <-ctx.Done(); dev.Close() }()
+	go watchHandshake(ctx, dev, ep)
 	return tnet, mtu, nil
+}
+
+// watchHandshake logs when wg0 really comes up: dev.Up only starts the
+// device, the peer is reachable once a handshake completes.
+func watchHandshake(ctx context.Context, dev *device.Device, ep netip.AddrPort) {
+	start := time.Now()
+	warned := false
+	t := time.NewTicker(time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		if s, err := dev.IpcGet(); err == nil && hasHandshake(s) {
+			log.Printf("chain: wg0 up: handshake with %s after %s", ep, time.Since(start).Round(time.Millisecond))
+			return
+		}
+		if !warned && time.Since(start) > 15*time.Second {
+			log.Printf("chain: WARNING: wg0 has no handshake with %s after 15s (check the keys and endpoint, or the server may drop Cloudflare IPs)", ep)
+			warned = true
+		}
+	}
+}
+
+func hasHandshake(uapi string) bool {
+	for _, line := range strings.Split(uapi, "\n") {
+		if v, ok := strings.CutPrefix(line, "last_handshake_time_sec="); ok && v != "0" {
+			return true
+		}
+	}
+	return false
 }
 
 // ExitTransportFits reports whether the exit hop can run QUIC through wg0.
