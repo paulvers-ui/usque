@@ -47,6 +47,10 @@ type WarpHop struct {
 	ReconnectDelay    time.Duration
 	AlwaysReconnect   bool
 	Insecure          bool
+	// FallbackHTTP2After switches an HTTP/3 hop to HTTP/2 after that many failed
+	// connects in a row (0 = never). Meant for WARP1, the only hop on the host
+	// network, where UDP 443 may be dropped or throttled.
+	FallbackHTTP2After int
 }
 
 // UnderlayOf makes a tunnel's stack usable as the transport of the next hop.
@@ -133,6 +137,13 @@ func startWarpTLS(ctx context.Context, h WarpHop, tlsConfig *tls.Config, under *
 	if h.UseHTTP2 {
 		transport = "HTTP/2"
 	}
+	var fallback net.Addr
+	if !h.UseHTTP2 && h.FallbackHTTP2After > 0 {
+		if fallback, err = c.SelectEndpoint(true, h.UseIPv6, h.ConnectPort); err != nil {
+			return nil, fmt.Errorf("%s: HTTP/2 fallback endpoint: %w", h.Name, err)
+		}
+		transport = fmt.Sprintf("HTTP/3 (HTTP/2 after %d failed connects)", h.FallbackHTTP2After)
+	}
 	log.Printf("chain: %s up: %s via %s, tunnel MTU %d", h.Name, endpoint, transport, h.MTU)
 	go api.MaintainTunnel(ctx, api.MaintainTunnelConfig{
 		TLSConfig:         tlsConfig,
@@ -145,6 +156,9 @@ func startWarpTLS(ctx context.Context, h WarpHop, tlsConfig *tls.Config, under *
 		AlwaysReconnect:   h.AlwaysReconnect,
 		UseHTTP2:          h.UseHTTP2,
 		Underlay:          UnderlayOf(under),
+
+		FallbackHTTP2Endpoint: fallback,
+		FallbackHTTP2After:    h.FallbackHTTP2After,
 	})
 	go func() { <-ctx.Done(); _ = tunDev.Close() }()
 	return tnet, nil
@@ -157,6 +171,9 @@ type WGHop struct {
 	UnderMTU int
 	// Keepalive is used when the config does not set PersistentKeepalive.
 	Keepalive int
+	// MTU, when > 0, replaces the config's MTU (still capped to what fits
+	// inside the hop below).
+	MTU int
 	// Resolver resolves a hostname Endpoint; it should dial through the hop
 	// below so the lookup is not visible to the ISP.
 	Resolver *doh.Client
@@ -226,9 +243,13 @@ func StartWG(ctx context.Context, h WGHop, under *netstack.Net) (*netstack.Net, 
 	}
 	ep := netip.AddrPortFrom(addr, port)
 
-	mtu := WGMTU(h.UnderMTU, addr.Is6(), cfg.MTU)
-	if cfg.MTU > mtu {
-		log.Printf("chain: wg0 MTU %d does not fit inside WARP1 (%d); using %d", cfg.MTU, h.UnderMTU, mtu)
+	want := cfg.MTU
+	if h.MTU > 0 {
+		want = h.MTU
+	}
+	mtu := WGMTU(h.UnderMTU, addr.Is6(), want)
+	if want > mtu {
+		log.Printf("chain: wg0 MTU %d does not fit inside WARP1 (%d); using %d", want, h.UnderMTU, mtu)
 	}
 	var addrs []netip.Addr
 	for _, p := range cfg.Addresses {
