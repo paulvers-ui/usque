@@ -208,6 +208,12 @@ type MaintainTunnelConfig struct {
 	// parent process env for OnConnect / OnDisconnect invocations. USQUE_EVENT
 	// and USQUE_ENDPOINT are set by MaintainTunnel itself.
 	HookEnv map[string]string
+	// FallbackHTTP2Endpoint and FallbackHTTP2After make an HTTP/3 tunnel switch to
+	// HTTP/2 (TCP) after that many failed connects in a row, for networks that
+	// drop or throttle UDP 443 (common on mobile data). The endpoint must be a
+	// *net.TCPAddr. Zero / nil disables it; the switch lasts for the process.
+	FallbackHTTP2Endpoint net.Addr
+	FallbackHTTP2After    int
 }
 
 // cloneHookEnv returns a shallow copy of src so concurrent hook invocations
@@ -257,6 +263,15 @@ func MaintainTunnel(ctx context.Context, cfg MaintainTunnelConfig) {
 			log.Fatalf("MaintainTunnel: HTTP/3 mode requires a *net.UDPAddr endpoint, got %T", cfg.Endpoint)
 		}
 	}
+	if cfg.FallbackHTTP2After > 0 {
+		if _, ok := cfg.FallbackHTTP2Endpoint.(*net.TCPAddr); !ok {
+			log.Fatalf("MaintainTunnel: the HTTP/2 fallback requires a *net.TCPAddr endpoint, got %T", cfg.FallbackHTTP2Endpoint)
+		}
+	}
+
+	// The transport in use; the HTTP/2 fallback may switch it below.
+	endpoint, useHTTP2 := cfg.Endpoint, cfg.UseHTTP2
+	quicFailures := 0
 
 	packetBufferPool := NewNetBuffer(cfg.MTU + datagramContextIDHeadroom)
 	var oversize oversizeLog
@@ -293,18 +308,25 @@ func MaintainTunnel(ctx context.Context, cfg MaintainTunnelConfig) {
 			log.Printf("Detected outbound activity (%d bytes). Reconnecting...", n)
 		}
 
-		log.Printf("Establishing MASQUE connection to %s", cfg.Endpoint)
+		log.Printf("Establishing MASQUE connection to %s", endpoint)
 		udpConn, tr, ipConn, rsp, err := ConnectTunnelOver(
 			ctx,
 			cfg.TLSConfig,
 			internal.DefaultQuicConfig(cfg.KeepalivePeriod, cfg.InitialPacketSize),
 			internal.ConnectURI,
-			cfg.Endpoint,
-			cfg.UseHTTP2,
+			endpoint,
+			useHTTP2,
 			cfg.Underlay,
 		)
 		if err != nil {
 			log.Printf("Failed to connect tunnel: %v", err)
+			if !useHTTP2 && cfg.FallbackHTTP2After > 0 {
+				quicFailures++
+				if quicFailures >= cfg.FallbackHTTP2After {
+					log.Printf("QUIC failed %d times in a row; falling back to HTTP/2 via %s", quicFailures, cfg.FallbackHTTP2Endpoint)
+					endpoint, useHTTP2 = cfg.FallbackHTTP2Endpoint, true
+				}
+			}
 			dropWake()
 			if ipConn != nil {
 				_ = ipConn.Close()
@@ -337,11 +359,14 @@ func MaintainTunnel(ctx context.Context, cfg MaintainTunnelConfig) {
 		}
 
 		log.Println("Connected to MASQUE server")
+		quicFailures = 0
+		// Fixed for this connection's pumps, even if a later iteration falls back.
+		connHTTP2 := useHTTP2
 
 		if cfg.OnConnect != "" {
 			env := cloneHookEnv(cfg.HookEnv)
 			env["USQUE_EVENT"] = "connect"
-			env["USQUE_ENDPOINT"] = cfg.Endpoint.String()
+			env["USQUE_ENDPOINT"] = endpoint.String()
 			RunHook(cfg.OnConnect, env)
 		}
 
@@ -413,7 +438,7 @@ func MaintainTunnel(ctx context.Context, cfg MaintainTunnelConfig) {
 			for {
 				packet, err := ipConn.ReadPacketZeroCopy(true)
 				if err != nil {
-					if cfg.UseHTTP2 {
+					if connHTTP2 {
 						errChan <- fmt.Errorf("connection closed while reading from IP connection: %w", err)
 						return
 					}
@@ -437,7 +462,7 @@ func MaintainTunnel(ctx context.Context, cfg MaintainTunnelConfig) {
 		if cfg.OnDisconnect != "" {
 			env := cloneHookEnv(cfg.HookEnv)
 			env["USQUE_EVENT"] = "disconnect"
-			env["USQUE_ENDPOINT"] = cfg.Endpoint.String()
+			env["USQUE_ENDPOINT"] = endpoint.String()
 			RunHook(cfg.OnDisconnect, env)
 		}
 

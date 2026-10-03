@@ -16,6 +16,13 @@ import (
 	"golang.zx2c4.com/wireguard/device"
 )
 
+// WARP2's tunnel carries IPv6 (needs a 1280-byte link) and never exceeds an
+// Ethernet-sized packet.
+const (
+	minExitMTU   = 1280
+	maxTunnelMTU = 1500
+)
+
 var chainCmd = &cobra.Command{
 	Use:   "chain",
 	Short: "SOCKS5 proxy over WARP1 -> WireGuard -> WARP2, nested in one process",
@@ -65,6 +72,7 @@ var chainCmd = &cobra.Command{
 			UseHTTP2: boolean("http2"), UseIPv6: boolean("ipv6"), ConnectPort: integer("connect-port"),
 			InitialPacketSize: ips, MTU: mtu1, Keepalive: dur("keepalive-period"),
 			ReconnectDelay: dur("reconnect-delay"), AlwaysReconnect: true, Insecure: insecure,
+			FallbackHTTP2After: integer("http2-fallback-after"),
 		}, nil)
 		if err != nil {
 			log.Fatalf("chain: %v", err)
@@ -82,7 +90,7 @@ var chainCmd = &cobra.Command{
 			logLevel = device.LogLevelVerbose
 		}
 		wg0, wgMTU, err := chain.StartWG(ctx, chain.WGHop{
-			Config: wgCfg, UnderMTU: mtu1, Keepalive: integer("wg-keepalive"),
+			Config: wgCfg, UnderMTU: mtu1, Keepalive: integer("wg-keepalive"), MTU: integer("wg-mtu"),
 			Resolver: resolver, LogLevel: logLevel,
 		}, warp1)
 		if err != nil {
@@ -105,9 +113,13 @@ var chainCmd = &cobra.Command{
 		if !exitHTTP2 {
 			exitIPS = uint16(wgMTU - 28)
 		}
+		exitMTU := integer("exit-mtu")
+		if exitMTU < minExitMTU || exitMTU > maxTunnelMTU {
+			log.Fatalf("chain: --exit-mtu must be %d..%d (IPv6 needs at least %d)", minExitMTU, maxTunnelMTU, minExitMTU)
+		}
 		warp2, err := chain.StartWarp(ctx, chain.WarpHop{
 			Name: "warp2", Config: exitCfg, SNI: str("exit-sni"),
-			UseHTTP2: exitHTTP2, ConnectPort: 443, InitialPacketSize: exitIPS, MTU: 1280,
+			UseHTTP2: exitHTTP2, ConnectPort: integer("exit-connect-port"), InitialPacketSize: exitIPS, MTU: exitMTU,
 			Keepalive: dur("keepalive-period"), ReconnectDelay: dur("reconnect-delay"),
 			AlwaysReconnect: true, Insecure: insecure,
 		}, wg0)
@@ -155,6 +167,10 @@ func init() {
 	f.String("exit-sni", internal.ConnectSNI, "SNI for the exit hop (hidden inside wg0, the ISP never sees it)")
 	f.Int("wg-keepalive", 25, "PersistentKeepalive for wg0 when its config sets none; keeps Cloudflare's NAT open")
 	f.Bool("wg-verbose", false, "Verbose WireGuard logs")
+	f.Int("wg-mtu", 0, "wg0 inner MTU; 0 = the config's MTU. Always capped to what fits inside WARP1 (-m minus 60, or 80 for an IPv6 endpoint)")
+	f.Int("exit-mtu", 1280, "WARP2 (exit) tunnel MTU")
+	f.Int("exit-connect-port", 443, "Port for the WARP2 MASQUE connection (inside wg0)")
+	f.Int("http2-fallback-after", 2, "WARP1: switch from QUIC to HTTP/2 after this many failed connects in a row, for networks that block UDP 443 (0 = never)")
 	f.StringP("sni-address", "s", internal.ConnectSNI, "SNI for WARP1 (the only hop the ISP sees)")
 	f.IntP("connect-port", "P", 443, "Port for the WARP1 MASQUE connection")
 	f.BoolP("ipv6", "6", false, "Use IPv6 for the WARP1 MASQUE connection")
